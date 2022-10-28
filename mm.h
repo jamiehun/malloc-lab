@@ -12,9 +12,9 @@ extern void *mm_realloc(void *ptr, size_t size);
  * type in their bits.c file.
  */
 typedef struct {
-    char *teamname; /* ID1+ID2 or ID1 */
-    char *name1;    /* full name of first member */
-    char *id1;      /* login ID of first member */
+    char *Jungle_week06_team06; /* ID1+ID2 or ID1 */
+    char *sunghun_chung;    /* full name of first member */
+    char *jamiehun;      /* login ID of first member */
     char *name2;    /* full name of second member (if any) */
     char *id2;      /* login ID of second member */
 } team_t;
