@@ -122,14 +122,42 @@ int mm_init(void)
  */
 void *mm_malloc(size_t size)
 {
-    int newsize = ALIGN(size + SIZE_T_SIZE);
-    void *p = mem_sbrk(newsize);
-    if (p == (void *)-1)
-	return NULL;
-    else {
-        *(size_t *)p = size;
-        return (void *)((char *)p + SIZE_T_SIZE);
+    // int newsize = ALIGN(size + SIZE_T_SIZE);
+    // void *p = mem_sbrk(newsize);
+    // if (p == (void *)-1)
+	// return NULL;
+    // else {
+    //     *(size_t *)p = size;
+    //     return (void *)((char *)p + SIZE_T_SIZE);
+    // }
+
+    size_t asize;       /* Adjusted block size */ // 조정된 
+    size_t extendsize;  /* Amount to extend heap if no fit */
+    char *bp;
+
+    /* Fake Request 걸러내기 */
+    if (size == 0)
+        return NULL;
+    
+    /* Adjust block size to include overhead and alignment reqs */
+    if (size <= DSIZE)
+        asize = 2*DSIZE; // 최소 16바이트
+    else                 // 크면
+        asize = DSIZE * ((size + (DSIZE) + (DSIZE - 1)) / DSIZE); // 인접 8의 배수로 반올림(?)
+
+    /* Search the free list for a fit */
+    if ((bp = find_fit(asize)) != NULL) { // 맞는 블록을 찾으면
+        place(bp, asize);               // 해당 블록에 저장
+        return bp;
     }
+
+    /* No fit found Get more memory and place the block */
+    extendsize = MAX(asize, CHUNKSIZE);
+    if ((bp = extend_heap(extendsize / WSIZE)) == NULL) // (extend / 8 word)
+        return NULL;
+    place(bp, asize);
+    return bp;
+
 }
 
 /*
