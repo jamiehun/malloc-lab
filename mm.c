@@ -114,7 +114,42 @@ int mm_init(void)
     return 0;
 }   
 
-/* */
+/* 
+ * find_fit
+ */
+static void *find_fit(size_t asize) // asize는 8의 배수
+{
+    char *bp;
+
+    // i = 1일 때 ~ CHUNKSIZE까지 검색하며 mem_brk를 찾기
+    for (i = 0; i < CHUNKSIZE; i++)
+    {
+        bp = 
+    }
+}
+
+/* 
+ * Find_fit
+ */
+static void *find_fit(size_t asize){
+    char *bp
+    bp = mem_brk; // 새로 시작하는 주소
+
+    while  ((bp < mem_max_addr) &&               // bp가 마지막 점을 넘지 않을 때까지
+           (((GET_ALLOC(HDRP(bp))) ||            // already allocated
+             (GET_SIZE(HDRP(bp)))) <= asize))    // too small
+        { bp = NEXT_BLKP(bp); }
+    
+    return bp;
+}
+
+/* 
+ * place 함수
+ */
+static void place(void *bp, size_t asize){
+    
+}
+
 
 /* 
  * mm_malloc - Allocate a block by incrementing the brk pointer.
