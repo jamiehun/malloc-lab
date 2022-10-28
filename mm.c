@@ -76,6 +76,7 @@ static void * extend_heap(size_t words)
     size_t size;
 
     /* Allocate an even number of words to maintain alignment (double-words aligned)*/
+    /* 요청한 크기를 인접 2워드의 배수(8바이트)로 반올림 */
     size = (words % 2) ? (words + 1) * WSIZE : words * WSIZE; // 1 : True -> odd number, 2: False -> even number
     if ((long)(bp = mem_sbrk(size) == -1)) // mem_sbrk : incr까지 늘리고 block의 최초 값을 return 해줌
         return NULL;
@@ -100,11 +101,11 @@ int mm_init(void)
     /* Create the initial empty heap */
     if ((heap_listp = mem_sbrk(4*WSIZE)) == (void *)-1)  // go to page 823 in CSAPP (4 word 할당 후 에러체크)
         return -1;
-    PUT(heap_listp, 0);                                 /* Alignment padding | total = 4 words (16bytes) */   
-    PUT(heap_listp + (1*WSIZE), PACK(DSIZE, 1));        /* Prologue header   | total = 5 words (20bytes) */
-    PUT(heap_listp + (2*WSIZE), PACK(DSIZE, 1));        /* Epilogue header   | total = 7 words (28bytes) */ 
-    PUT(heap_listp + (3*WSIZE), PACK(0, 1));            /* total = 10 words (40bytes) */
-    heap_listp += (2*WSIZE);                            /* total = 12 words (48bytes) */    
+    PUT(heap_listp, 0);                                 /* Alignment padding     | 0 저장     */   
+    PUT(heap_listp + (1*WSIZE), PACK(DSIZE, 1));        /* Prologue header       | (8/1) 저장 */
+    PUT(heap_listp + (2*WSIZE), PACK(DSIZE, 1));        /* Epilogue header       | (8/1) 저장 */ 
+    PUT(heap_listp + (3*WSIZE), PACK(0, 1));            /* Epilogue block header | (0/1) 저장 */
+    heap_listp += (2*WSIZE);                              
 
     /* Extend the empty heap with a free block of CHUNKSIZE bytes*/
     /* CHUNKSIZE 바이트의 free block인 비어있는 힙으로 늘림 */
@@ -112,6 +113,8 @@ int mm_init(void)
         return -1;
     return 0;
 }   
+
+/* */
 
 /* 
  * mm_malloc - Allocate a block by incrementing the brk pointer.
@@ -130,10 +133,50 @@ void *mm_malloc(size_t size)
 }
 
 /*
+ * coalesce - 연결
+ */
+static void *coalesce(void *bp)
+{
+    size_t prev_alloc = GET_ALLOC(FTRP(PREV_BLKP(bp)));  // prev 블록의 할당여부 확인
+    size_t next_alloc = GET_ALLOC(HDRP(NEXT_BLKP(bp)));  // next 블록의 할당여부 확인
+    size_t size = GET_SIZE(HDRP(bp));                    // 현재 블록의 사이즈 확인
+
+    if (prev_alloc && next_alloc) {                      /* Case 1 */   
+        return bp;                                       /* prev 할당 & next 할당 */
+    }
+
+    else if (prev_alloc && !next_alloc) {                /* Case 2 */
+        size += GET_SIZE(HDRP(NEXT_BLKP(bp)));           /* prev 할당 & next 미할당 */
+        PUT(HDRP(bp), PACK(size, 0));                    // 현재 헤더에 새로운 size 넣고
+        PUT(FTRP(bp), PACK(size, 0));                    // 새로운 사이즈를 기준으로 새로운 footer에도 정보 저장
+    
+    else if (!prev_alloc && next_alloc) {                /* Case 3*/
+        size += GET_SIZE(HDRP(PREV_BLKP(bp)));           /* prev 미할당 & next 할당 */
+        PUT(FTRP(bp), PACK(size, 0));                    // 현재 footer에 새로운 size 넣고
+        PUT(HDRP(PREV_BLKP(bp)), PACK(size, 0));         // 새로운 사이즈를 prev header에 넣고 저장
+        bp = PREV_BLKP(bp);                              // bp는 prev에 저장
+
+    else {
+        size += GET_SIZE(HDRP(PREV_BLKP(bp))) +          /* Case 4 */
+            GET_SIZE(FTRP(NEXT_BLKP(bp)));               /* prev 미할당 & next 미할당 */   
+        PUT(HDRP(PREV_BLKP(bp)), PACK(size, 0));         // 이전 header에 size 넣고
+        PUT(FTRP(NEXT_BLKP(bp)), PACK(size, 0));         // 이후 footer에 size 넣음
+        bp = PREV_BLKP(bp);
+    }
+    return bp;
+    }
+}
+
+/*
  * mm_free - Freeing a block does nothing.
  */
-void mm_free(void *ptr)
+void mm_free(void *bp)
 {
+    size_t size = GET_SIZE(HDRP(bp));   // bp의 size를 얻음
+
+    PUT(HDRP(bp), PACK(size, 0));       // bp의 헤더에 (size, 0(미할당)) 추가
+    PUT(FTRP(bp), PACK(size, 0));       // bp의 footer에 (size, 0(미할당)) 추가
+    coalesce(bp);                       // 연결
 }
 
 /*
