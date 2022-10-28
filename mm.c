@@ -24,11 +24,11 @@
  ********************************************************/
 team_t team = {
     /* Team name */
-    "ateam",
+    "jungle_week06_team06",
     /* First member's full name */
-    "Harry Bovik",
+    "jamiehun",
     /* First member's email address */
-    "bovik@cs.cmu.edu",
+    "jamiesunghun@gmail.com",
     /* Second member's full name (leave blank if none) */
     "",
     /* Second member's email address (leave blank if none) */
@@ -37,12 +37,36 @@ team_t team = {
 
 /* single word (4) or double word (8) alignment */
 #define ALIGNMENT 8
-
 /* rounds up to the nearest multiple of ALIGNMENT */
 #define ALIGN(size) (((size) + (ALIGNMENT-1)) & ~0x7)
-
-
 #define SIZE_T_SIZE (ALIGN(sizeof(size_t)))
+
+/* Basic constants and macros */
+#define WSIZE       4           /* Word and header/footer size (bytes)*/ /* the size of word == the size of header/footer */
+#define DSIZE       8           /* Double word size (bytes)*/
+#define CHUNKSIZE   (1<<12)     /* Extend heap by this amount (bytes)*/
+
+#define MAX(x, y) ((x) > (y)? (x) : (y))
+
+/* Pack a size and allocated bit into a word */
+#define PACK(size, alloc)  ((size) | (alloc))
+
+/* Read and write a word at address P */
+#define GET(p)      (*(unsigned int *)(p))    /* The argument p is typically a (void *) pointer, which cannot be dereferenced directly*/
+                                             /* Thus, casting is used on the line */
+#define PUT(p, val) (*(unsigned int *)(p) = (val))
+
+/* Read the size and allocated fields from address p */
+#define GET_SIZE(p) (GET(p) & ~0x7)          /* p(bit) & (1111 1000(2)) */
+#define GET_ALLOC(p) (GET(p) & 0x1)
+
+/* Given block ptr bp, compute address of its header and footer */
+#define HDRP(bp)    ((char *)(bp) - WSIZE)
+#define FTRP(bp)    ((char *)(bp) + GET_SIZE(HDRP(bp)) - DSIZE)
+
+/* Given block ptr bp, compute address of next and previous blocks */
+#define NEXT_BLKP(bp) ((char *)(bp) + GET_SIZE(((char *)(bp) - WSIZE)))
+#define PREV_BLKP(bp) ((char *)(bp) - GET_SIZE(((char *)(bp) - DSIZE)))
 
 /* 
  * mm_init - initialize the malloc package.
