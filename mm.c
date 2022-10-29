@@ -160,6 +160,7 @@ static void *coalesce(void *bp)
 /* 
  * mm_malloc - Allocate a block by incrementing the brk pointer.
  *     Always allocate a block whose size is a multiple of the alignment.
+ * 블록 할당을 brk 포인터를 증가시킴으로써 실행해줌
  */
 void *mm_malloc(size_t size)
 {
@@ -281,10 +282,18 @@ void *mm_realloc(void *ptr, size_t size)
     newptr = mm_malloc(size);
     if (newptr == NULL)
       return NULL;
-    copySize = *(size_t *)((char *)oldptr - SIZE_T_SIZE);
-    if (size < copySize)
-      copySize = size;
-    memcpy(newptr, oldptr, copySize);
-    mm_free(oldptr);
-    return newptr;
+
+    // copySize = *(size_t *)((char *)oldptr - SIZE_T_SIZE);
+    /* copy size는 oldptr의 사이즈를 copy하는 것인데 (temp와 같은 역할) */
+    /* oldptr에 WSIZE(1워드 - 헤더)를 한번 빼주고 할당된 값 (마지막 1)을 빼줌 => free된 상태 */
+    // copySize = *(size_t *)((char *)oldptr - WSIZE);
+
+    /* 혹은 oldptr의 헤더에 가서 size를 받아줌 */
+    copySize = GET_SIZE(HDRP(oldptr));
+
+    if (size < copySize)    // 만약 copySize(old ptr)이 realloc하려는 (newptr) size보다 크다면
+      copySize = size;      // copySize = size
+    memcpy(newptr, oldptr, copySize);  // memcpy(목적지 포인터, 원본포인터, 크기) => 원본 포인터의 내용을 목적지 포인터에 저장
+    mm_free(oldptr);                   // oldptr은 free
+    return newptr;                     // 새로운 포인터를 리턴
 }
