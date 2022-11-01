@@ -60,6 +60,8 @@ team_t team = {
 #define GET(p)      (*(unsigned int *)(p))    /* The argument p is typically a (void *) pointer, which cannot be dereferenced directly*/
                                              /* Thus, casting is used on the line */
 #define PUT(p, val) (*(unsigned int *)(p) = (val))
+#define PUT_NOTAG(p, val) (*(unsigned int *)(p) = (val)) /* p에 val이라는 변수를 저장해줌 */
+
 
 /* Read the size and allocated fields from address p */
 #define GET_SIZE(p) (GET(p) & ~0x7)          /* p(bit) & (1111 1000(2)) */
@@ -73,12 +75,20 @@ team_t team = {
 #define NEXT_BLKP(bp) ((char *)(bp) + GET_SIZE(((char *)(bp) - WSIZE)))
 #define PREV_BLKP(bp) ((char *)(bp) - GET_SIZE(((char *)(bp) - DSIZE)))
 
+/* 리스트의 최대크기에 대한 설정 */
+#define LISTLIMIT = 20
+
+/* INIT CHUNK SIZE */
+#define INITCHUNKSIZE (1<<6)  // 100 0000(2) => 2^6 => 64
+
 static void *extend_heap(size_t words);
 static void *coalesce(void *bp);
 static void *find_fit(size_t asize);
 static void *next_fit(size_t asize);
 static void *best_fit(size_t asize);
 static void place(void *bp, size_t asize);
+void segregated_free_lists[LISTLIMIT]; // segregated_free_list를 배열로 설정    
+                                       // 원래는 리스트를 전역변수로 설정하면 안됨 (과제 instruction)
 
 
 static char *heap_listp;
@@ -96,23 +106,30 @@ static char *cur_bp;
  */
 int mm_init(void)
 {   
-    /* Create the initial empty heap */
-    if ((heap_listp = mem_sbrk(4*WSIZE)) == (void *)-1)  // go to page 823 in CSAPP (4 word 할당 후 에러체크)
+    int list;         // list counter
+    char *heap_start; // 힙의 처음 시작 지점 pointer
+
+    /* segregated free list의 포인터를 초기화*/
+    for(list = 0; list <LISTLIMIT; list++){
+        segregated_free_lists[list] = NULL;   // index: 0 ~ 19
+    }
+
+    /* 초기 빈 힙을 메모리에 할당 */
+    if ((long)(heap_start = mem_sbrk(4 * WSIZE)) == -1) // long = 4bytes
+        return -1;
+
+    PUT_NOTAG(heap_start, 0);                             /* Alignment padding */
+    PUT_NOTAG(heap_start + (1 * WSIZE), PACK(DSIZE, 1));  /* Prologue header */
+    PUT_NOTAG(heap_start + (2 * WSIZE), PACK(DSIZE, 1));  /* Prologue footer */
+    PUT_NOTAG(heap_start + (3 * WSIZE), PACK(0, 1));      /* Epilogue header */
+
+    if (extend_heap(INITCHUNKSIZE) == NULL)   // 2의 6승까지 늘림 /* 의문! CHUNKSIZE까지 늘리면 안될까? */
         return -1;
     
-    PUT(heap_listp, 0);                                 /* Alignment padding     | 0 저장     */   
-    PUT(heap_listp + (1*WSIZE), PACK(DSIZE, 1));        /* Prologue header       | (8/1) 저장 */
-    PUT(heap_listp + (2*WSIZE), PACK(DSIZE, 1));        /* Prologue footer       | (8/1) 저장 */ 
-    PUT(heap_listp + (3*WSIZE), PACK(0, 1));            /* Epilogue block header | (0/1) 저장 */
-    heap_listp += (2*WSIZE);                              
-    cur_bp = heap_listp;
-
-    /* Extend the empty heap with a free block of CHUNKSIZE bytes*/
-    /* CHUNKSIZE 바이트의 free block인 비어있는 힙으로 늘림 */
-    if (extend_heap(CHUNKSIZE/WSIZE) == NULL) // (2 ^ 11 / 4)
-        return -1;
     return 0;
 }   
+
+
 
 /* extend_heap */
 /* 새 가용 블록으로 힙 확장하기 */
@@ -206,7 +223,7 @@ void *mm_malloc(size_t size)
         asize = DSIZE * ((size + (DSIZE) + (DSIZE - 1)) / DSIZE); // DSIZE는 8바이트로 바꿔주는 것임 
 
     /* Search the free list for a fit */
-    if ((bp = find_fit(asize)) != NULL) { // 맞는 블록을 찾으면
+    if ((bp = best_fit(asize)) != NULL) { // 맞는 블록을 찾으면
         place(bp, asize);               // 해당 블록에 저장
         return bp;
     }
