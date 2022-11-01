@@ -89,6 +89,10 @@ team_t team = {
 /* INIT CHUNK SIZE */
 #define INITCHUNKSIZE (1<<6)  // 100 0000(2) => 2^6 => 64
 
+/* Address of free block's predecessor and successor on the segregated list */
+#define SUCC_SEG(ptr) (*(char **)(ptr))  // 이중포인터의 역참조
+
+
 static void *extend_heap(size_t words);
 static void *coalesce(void *bp);
 static void *find_fit(size_t asize);
@@ -131,6 +135,66 @@ int mm_init(void)
 }   
 
 
+/* 
+ * mm_malloc - brk 포인터를 증가시킴으로써 블록을 할당함
+ *             블록의 총 사이즈는 alignement의 2배값 (16)임
+ * 역할 :
+ * 1. mm_malloc의 리턴 값은 할당된 block의 payload의 첫번째 값을 가르킴
+ * 2. 할당된 전체 블록은 반드시 힙 안에 위치해야함
+ * 리턴되는 포인터의 경우 항상 8바이트 크기의 payload를 가르키는 pointer
+ */
+void *mm_malloc(size_t size)
+{
+    size_t asize;       /* Adjusted block size : 조정된 사이즈 */
+    size_t extendsize;  /* Amount to extend heap if no fit */
+    char *ptr = NULL;   /* Pointer ; implicit와 explicit와 다른점 */
+    int list = 0;       /* list count 값 */
+
+    /* Fake Request 걸러내기 */
+    if (size == 0)
+        return NULL;
+    
+    /* 블록을 최소 16바이트로 늘려줌 (CSAPP 823page) */
+    if (size <= DSIZE)
+        asize = 2*DSIZE; // 최소 16바이트, 8바이트는 header + footer 만의 최소 블록 크기이므로, 그 다음 8의 배수인 16바이트로 설정
+    else                 // 크면
+        asize = DSIZE * ((size + (DSIZE) + (DSIZE - 1)) / DSIZE); // 7을 더함으로써 size = 1일 때 최소 16바이트 나올 수 있음 
+                                                                  // 32비트에서는 8의 배수인 블록을 리턴
+
+    /* Segregated List에 맞는 사이즈의 free block이 존재한다면 선택 */ /* (?)정확히 이해가 안됨 */
+    size_t searchsize = asize;
+    while (list < LISTLIMIT) { // list count가 LISTLIMIT보다 적을 때
+        // list가 LISTLIMIT보다 1개 적거나 (searchsize가 1보다 작거나 segregated free list가 NULL일 때)
+        if ((list == LISTLIMIT - 1) || ((searchsize <= 1) && (segregated_free_lists[list] != NULL))) {
+            ptr = segregated_free_lists[list]; // 포인터를 해당 Segregated Free List에 지정
+            
+            /* 만약 포인터가 NULL이 아니고 블록이 너무 작거나 reallocation bit로 마크되어 있을 때 */
+            while ((ptr != NULL) && ((asize > GET_SIZE(HDRP(ptr))) || (GET_TAG(HDRP(ptr)))))
+            {
+                ptr = SUCC_SEG(ptr); // 포인터는 Segregated List 상의 다음 주소로 설정됨
+            }
+            if (ptr != NULL) // 할당되어 있으면 break
+                break;
+        }
+
+        searchsize >>= 1; // searchsize를 2 만큼 줄여줌
+        list++;           // 리스트의 숫자를 1 늘려줌 
+     }
+
+     /* free blocks가 없거나 충분한 사이즈의 힙이 없을시 Extend heap을 수행 */
+     if (ptr == NULL) {
+        extendsize = MAX(asize, CHUNKSIZE);
+
+        if ((ptr = extend_heap(extendsize)) == NULL)
+            return NULL;
+     }
+
+     /* 블록을 위치시킴 */
+     ptr = place(ptr, asize);
+
+     /* 포인터를 새로 할당된 블록에 주소로 리턴함 */
+     return ptr;
+}
 
 /* extend_heap */
 /* 새 가용 블록으로 힙 확장하기 (워드 단위 메모리를 인자로 받아 힙을 늘려줌) */
