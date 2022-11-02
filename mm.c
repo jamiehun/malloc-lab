@@ -76,6 +76,7 @@ team_t team = {
 #define REALLOCATION_SIZE (1 << 9) /* 재 할당 사이즈?? */
 
 #define MAX(x, y) ((x) > (y)? (x) : (y)) // 최대값 구하는 함수
+#define MIN(x, y) ((x) < (y)? (x) : (y)) // 최소값 구하는 함수
 
 /* Pack a size and allocated bit into a word */
 /* header 및 footer 값 (size + allocated) */
@@ -105,6 +106,14 @@ team_t team = {
                                                                        //                                      -> | header + payload + footer | | header + payload + .. |
                                                                        //                                                  ^                                                                                                      ^
 
+/* Address of next and prev respecitvely. PTR must be header address */
+#define GET_NEXT(ptr) (*(char **) (ptr + WSIZE))
+#define GET_PREV(ptr) (*(char **) (ptr + DSIZE))
+
+/* Address that stores the pointers to next and prev respectively */
+#define GET_NEXTP(ptr) ((char *) ptr + WSIZE)
+#define GET_PREVP(ptr) ((char *) ptr + 2 * WSIZE)
+
 /* Free List 상에서 이전과 이후 블록의 포인터를 return */
 #define PREC_FREEP(bp) (*(void**)(bp))         // void를 가르키는 이중포인터의 역참조 ; 이전 블록의 bp
 #define SUCC_FREEP(bp) (*(void**)(bp + WSIZE)) // void를 가르키는 이중포인터의 역참조 ; 이후 블록의 bp
@@ -120,45 +129,39 @@ void removeBlock(void *bp);
 void putFreeBlock(void *bp);
 
 
-static char *heap_listp; // Prologue block을 가르키는 정적 전역 변수 설정
-static char *free_listp; // free list의 맨 첫 블록을 가르키는 포인터
-
-/* 
- * cur_bp의 목적 : 마지막으로 free된 상태의 포인터 위치를 쫓아가기 목적
- * cur_bp 변경 지점
- * 1) 처음에 Prologue Block의 heap_listp로 지정
- * 2) fit 될 경우 cur_bp 업데이트 
- * 3) coalescing 경우에도 next_bp 업데이트
- */
-static char *cur_bp;
+void *heap_listp;  // Prologue block을 가르키는 정적 전역 변수 설정
+void **free_list;  // Array of pointers to the free list
 
 /* 
  * mm_init - initialize the malloc package.
  */
 int mm_init(void)
 {   
+    /* Allocate the memory for the free list */
+    free_list = mem_sbrk(FREE_LIST_SIZE * WSIZE); // 20 사이즈의 free_list를 설정 (가장 첫번째 값에 대한 pointer가 return 됨)
+
     /* Create the initial empty heap */
-    /* 초기 설정은 implicit free list와는 다르게 6 words로 설정 */
-    /* 이유는 padding, prologue_header, prologue_footer, PREC, SUCC, epilogue_header */
-    if ((heap_listp = mem_sbrk(6*WSIZE)) == (void *)-1)  // go to page 823 in CSAPP (6 words 할당 후 에러체크)
+    /* 초기 설정은 4 words로 설정 => Padding | Prologue header | Prologue footer | Epilogue block header */
+    if ((heap_listp = mem_sbrk(4*WSIZE)) == (void *)-1) 
         return -1;
     
-    PUT(heap_listp, 0);                                 /* Alignment padding     | 0 저장     */   
-    PUT(heap_listp + (1*WSIZE), PACK(MINIMUM, 1));      /* Prologue header       | (8/1) 저장 */
-    PUT(heap_listp + (2*WSIZE), NULL);                  /* Predecessor           | 이전 주소값 저장하기 위함인데 현재는 포인터 없어서 NULL 값으로 초기화 */    
-    PUT(heap_listp + (3*WSIZE), NULL);                  /* Successor             | 다음 주소값 저장하기 위함인데 현재는 포인터 없어서 NULL 값으로 초기화 */
-    PUT(heap_listp + (4*WSIZE), PACK(MINIMUM, 1));      /* Prologue footer       | (8/1) 저장 */ 
-    PUT(heap_listp + (5*WSIZE), PACK(0, 1));            /* Epilogue block header | (0/1) 저장 */
-                                                        // 왜 16/1으로 둘까?, 왜 prologue footerfmf pred, succ 뒤에 둘까?
-    heap_listp += (2*WSIZE);                            
-    free_listp = heap_listp;                            // free_listp를 지속적으로 업데이트해줘야함 (초기값 설정)
+    PUT(heap_listp, 0);                          // Padding         | 0 
+    PUT(heap_listp + (1*WSIZE), PACK(DSIZE, 1))  // Prologue Header | 8 / 1
+    PUT(heap_listp + (2*WSIZE), PACK(DSIZE, 1))  // Prologue Footer | 8 / 1
+    PUT(heap_listp + (3*WSIZE), PACK(0, 1))      // Epilogue Header | 1 / 0
 
-    cur_bp = heap_listp;
+    // Set Every head to NULL initially
+    for (int i = 0; i < FREE_LIST_SIZE; i++){
+      free_list[i] = NULL;
+    }
 
-    /* Extend the empty heap with a free block of CHUNKSIZE bytes*/
-    /* CHUNKSIZE 바이트의 free block인 비어있는 힙으로 늘림 */
-    if (extend_heap(CHUNKSIZE/WSIZE) == NULL) // (4096bytes / 4)
-        return -1;
+    // Extend the Empty Heap with a free block of CHUNKSIZE bytes
+    if((extend_heap(CHUNKSIZE)) == NULL)
+      return -1;
+
+    // Set up the head_listp toe the location of the next block of the initial block
+    head_listp += WSIZE;
+
     return 0;
 }   
 
