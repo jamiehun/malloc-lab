@@ -127,6 +127,7 @@ static void *best_fit(size_t asize);
 static void place(void *bp, size_t asize);
 void removeBlock(void *bp);
 void putFreeBlock(void *bp);
+int get_list_idx(size_t size)
 
 
 void *heap_listp;  // Prologue block을 가르키는 정적 전역 변수 설정
@@ -196,6 +197,63 @@ static void *extend_heap(size_t words)
     find_place(ptr);
 
     return ptr;
+}
+
+/*
+ * find_place : 현재의 ptr이 놓일 적절한 위치를 찾는 함수 (free_list를 위해서)
+ */
+
+void find_place(void *ptr)
+{
+  int listIdx = get_list_index(GET_SIZE(ptr));
+  void *current = free_list[listIdx];
+
+  // Case 1 : Current is NULL
+  if(current == NULL){
+    free_list[listIdx] = ptr;
+
+    return;
+  }
+
+  // Case 2 : 바로 뒤에 하나의 값 밖에 없을 때
+  if(ptr < current)
+  {
+    PUT(GET_NEXTP(ptr), current);  // ptr의 다음 포인터는 current
+    PUT(GET_NEXT(ptr), *current);  // ptr의 다음 값은 current의 역참조 
+    PUT(GET_PREVP(current), ptr);  // current의 이전 포인터는 ptr
+    PUT(GET_PREV(current), *ptr);  // current의 이전 값은 ptr의 역참조
+    free_list[Idx] = ptr;          
+
+    return;
+  }
+
+  // Case 3: ptr이 Free list의 중간에 있어야할 때 (current < ptr < next)
+  void *next; 
+  while ((next = GET_NEXT(current)) != NULL)
+  {
+    if (ptr < next) {
+      PUT(GET_NEXTP(current) = ptr);
+      PUT(GET_NEXT(current) = *ptr);
+
+      PUT(GET_PREVP(next) = ptr);
+      PUT(GET_PREV(next) = *ptr);
+
+      PUT(GET_PREVP(ptr) = current);
+      PUT(GET_PREV(ptr) = *current);
+
+      PUT(GET_NEXTP(ptr) = next);
+      PUT(GET_NEXT(ptr) = *next);
+    }
+
+    current = GET_NEXTP(current);
+  }
+
+  // 가장 마지막에 위치시킴
+  PUT(GET_NEXTP(current), ptr);
+  PUT(GET_NEXT(current), *ptr);
+
+  PUT(GET_PREVP(ptr), current);
+  PUT(GET_PREV(ptr), *current);
 }
 
 
@@ -462,4 +520,19 @@ void *mm_realloc(void *ptr, size_t size)
     memcpy(newptr, oldptr, copySize);  // memcpy(목적지 포인터, 원본포인터, 크기) => 원본 포인터의 내용을 목적지 포인터에 copySize만큼 복사해서 저장
     mm_free(oldptr);                   // oldptr은 free
     return newptr;                     // 새로운 포인터를 리턴
+}
+
+/*
+ * get_list_idx :  Free_list의 idx를 찾기 위한 함수
+ */
+int get_list_idx(size_t size){
+  int idx = 0; // idx가 0부터 시작
+
+  // 비트 연산을 활용해서 size를 2의 0승까지 줄임
+  while ((size = size >> 1) > 1)
+  {
+    idx++;
+  }
+
+  return idx;
 }
