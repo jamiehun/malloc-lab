@@ -176,8 +176,8 @@ int mm_init(void)
 void *mm_malloc(size_t size){
     size_t asize;       /* Adjusted block size : 조정된 사이즈 */
     size_t extendsize;  /* Amount to extend heap if no fit */
-    void *dest = NULL;
-    char* bp;
+    void *dp = NULL;
+
 
     /* Fake Request 걸러내기 */
     if (size == 0)
@@ -191,21 +191,22 @@ void *mm_malloc(size_t size){
                                                                   // 32비트에서는 8의 배수인 블록을 리턴
 
     // find the best fit
-    dest = find_fit(asize);
+    dp = find_fit(asize);
 
     /* asize에 맞는 bp 찾기  */
-    if (dest != NULL) {  
+    if (dp == NULL) {  
 
     /* No fit found Get more memory and place the block (asize 또는 CHUNKSIZE 만큼 가용 리스트 범위 넓혀줌) */
     // 맞는 크기의 메모리가 없으면 asize 혹은 CHUNKSIZE 보다 크게 heap의 크기를 늘려줌
     extendsize = MAX(asize, CHUNKSIZE); // asize가 CHUNKSIZE보다 큰 경우는 size가 요구하는 8바이트 기준의 크기가 매우 큼을 의미
-    if ((bp = extend_heap(extendsize / WSIZE)) == NULL) // (extend / 8 word)
+    if ((dp = extend_heap(extendsize / WSIZE)) == NULL) // (extend / 8 word)
         return NULL;
     }
 
-    place(dest, asize);
-    return dest + WSIZE;
+    place(dp, asize);
+    return dp + WSIZE;
 }
+
 
 
 /*
@@ -215,8 +216,8 @@ void mm_free(void *ptr)
 {
     size_t size = GET_SIZE(HDRP(ptr));   // size를 얻음
 
-    PUT(ptr, PACK(size, 0));             // bp의 헤더에 (size, 0(미할당)) 추가
-    PUT(ptr, PACK(size, 0));             // bp의 footer에 (size, 0(미할당)) 추가
+    PUT(HDRP(ptr), PACK(size, 0));             // bp의 헤더에 (size, 0(미할당)) 추가
+    PUT(HDRP(ptr), PACK(size, 0));             // bp의 footer에 (size, 0(미할당)) 추가
     void* newPtr = coalesce(HDRP(ptr));  // 앞, 뒤 블록 중 연결할 곳이 있으면 연결 
 
     //Place in a free list
@@ -357,51 +358,51 @@ static void place(void *ptr, size_t asize)
  * coalesce - 연결
  */
 static void *coalesce(void *ptr) {
+    //Get the headers of next and previous
     void* nextH = HDRP(NEXT_BLKP(ptr + WSIZE));
     void* prevH = HDRP(PREV_BLKP(ptr + WSIZE));
 
+    //Get teh sizes of all three
     size_t prev_alloc = GET_ALLOC(prevH);
     size_t next_alloc = GET_ALLOC(nextH);
     size_t size = GET_SIZE(ptr);
 
-    /* Case 1 */   
-    /* prev 할당 & next 할당 */
-    /* 해당 블록만 free list에 넣음 */
+    if(prev_alloc && next_alloc) { /*Case 1*/ }
+    else if(prev_alloc && !next_alloc) 
+    { //Case 2
+        removeBlock(nextH);
 
-    /* Case 2 */   
-    if (prev_alloc && !next_alloc) {                
-        removeBlock(nextH);                      // free 상태였던 직후 블록을 free list에서 제거
-        size += GET_SIZE(nextH);           /* prev 할당 & next 미할당 */
-        PUT(ptr, PACK(size, 0));                    // 현재 헤더에 새로운 size 넣고
-        PUT(ptr + WSIZE, PACK(size, 0));                    // 새로운 사이즈를 기준으로 새로운 footer에도 정보 저장
+        size += GET_SIZE(nextH);
+        PUT(ptr, PACK(size, 0));
+        PUT(FTRP(ptr + WSIZE), PACK(size, 0));
+    } 
+    else if(!prev_alloc && next_alloc) 
+    { //Case 3
+        removeBlock(prevH);
+        
+        size += GET_SIZE(prevH);
+
+        PUT(HDRP(PREV_BLKP(ptr + WSIZE)), PACK(size, 0));
+        PUT(FTRP(ptr + WSIZE), PACK(size, 0));
+
+        ptr = HDRP(PREV_BLKP(ptr + WSIZE));
+    }
+    else 
+    { //Case 4
+        removeBlock(prevH);
+        removeBlock(nextH);
+
+        size += GET_SIZE(prevH) + GET_SIZE(nextH);
+
+        PUT(HDRP(PREV_BLKP(ptr + WSIZE)), PACK(size, 0));
+        PUT(FTRP(NEXT_BLKP(ptr + WSIZE)), PACK(size, 0));
+
+        ptr = HDRP(PREV_BLKP(ptr + WSIZE));
     }
 
-    else if (!prev_alloc && next_alloc) {                /* Case 3*/
-        removeBlock(prevH);                // 직전 블록을 free list에서 제거
-        size += GET_SIZE(prevH);           /* prev 미할당 & next 할당 */
-        // bp = PREV_BLKP(bp);                           // bp는 이전 값에 저장해놓음
-        PUT(HDRP(PREV_BLKP(ptr + WSIZE)), PACK(size, 0));          // 새로운 사이즈를 prev header에 넣고 저장
-        PUT(FTRP(ptr + WSIZE), PACK(size, 0));                    // 현재 footer에 새로운 size 넣고
-        ptr = HDRP(PREV_BLKP(ptr + WSIZE));                                  // ptr은 이전 값의 헤더에 저장
-    }
+    PUT(GET_NEXTP(ptr), (uint)NULL); //place null for next
+    PUT(GET_PREVP(ptr), (uint)NULL); //place null for prev
 
-    else if (!prev_alloc && !next_alloc) {               /* Case 4 */
-        removeBlock(prevH);                // 직전 블록을 free list에서 제거
-        removeBlock(nextH);                // 다음 블록을 free list에서 제거
-
-        size += GET_SIZE(prevH) +   
-            GET_SIZE(nextH);               /* prev 미할당 & next 미할당 */
-            
-        PUT(HDRP(PREV_BLKP(ptr+WSIZE)), PACK(size, 0));          // 이전 header에 size 넣고
-        PUT(FTRP(NEXT_BLKP(ptr+WSIZE)), PACK(size, 0));          // 이후 footer에 size 넣음
-
-
-        ptr = HDRP(PREV_BLKP(ptr+WSIZE));      
-    }
-
-    PUT(GET_NEXTP(ptr), NULL);
-    PUT(GET_PREVP(ptr), NULL);
-    
     return ptr;
 }
 
