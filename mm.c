@@ -72,7 +72,7 @@ team_t team = {
 #define DSIZE       8           /* Double word size (bytes)*/
 #define MINIMUM     16          /* Initial Prologue block size, header, footer, PREC, SUCC */
 #define CHUNKSIZE   (1<<12)     /* Extend heap by this amount (bytes)*/ /* 1 0000 0000 0000(2) => 4096 (bytes) */
-#define FREE_LIST_SIZE 20       /* Free_list_size를 20으로 설정 */
+#define FREE_LIST_SIZE 32       /* Free_list_size를 20으로 설정 */
 #define REALLOCATION_SIZE (1 << 9) /* 재 할당 사이즈?? */
 
 #define MAX(x, y) ((x) > (y)? (x) : (y)) // 최대값 구하는 함수
@@ -159,7 +159,7 @@ int mm_init(void)
     if((extend_heap(CHUNKSIZE)) == NULL)
       return -1;
 
-    // Set up the head_listp toe the location of the next block of the initial block
+    // Set up the head_listp to the location of the next block of the initial block
     head_listp += WSIZE;
 
     return 0;
@@ -180,28 +180,41 @@ static void *extend_heap(size_t words)
 
     /* Initialize free block header/footer and the epilogue header */
     PUT(HDRP(bp), PACK(size, 0));            /* Free block header */
+    PUT(bp, NULL)                            /* NEXT */
+    PUT(bp + WSIZE, NULL)                    /* PREV */
     PUT(FTRP(bp), PACK(size, 0));            /* Free block footer */
     PUT(HDRP(NEXT_BLKP(bp)), PACK(0, 1));    /* New epilogue header */
 
-    /* Coalesce if the previous block was free */
-    /* 이전 블록이 free이면 연결*/
-    return coalesce(bp); // void pointer 함수를 리턴해줌 , 초기에는 coalesce로 바로 이동
+
+    /* 포인터를 각 블록의 맨 앞으로 배치 */
+    /* 매크로의 영향 : #define GET_NEXT(ptr) (*(char **) (ptr + WSIZE)) */
+    void *ptr = HDRP(bp);
+
+    ptr = coalesce(bp); // -> coalesce로 이동
+    
+    // Find place for ptr
+    find_place(ptr);
+
+    return ptr;
 }
+
 
 /*
  * coalesce - 연결
  */
-static void *coalesce(void *bp)
+static void *coalesce(void *bp) 
 {
     size_t prev_alloc = GET_ALLOC(FTRP(PREV_BLKP(bp)));  // prev 블록의 할당여부 확인
     size_t next_alloc = GET_ALLOC(HDRP(NEXT_BLKP(bp)));  // next 블록의 할당여부 확인
     size_t size = GET_SIZE(HDRP(bp));                    // 현재 블록의 사이즈 확인
+    void* ptr;
 
     /* Case 1 */   
     /* prev 할당 & next 할당 */
     /* 해당 블록만 free list에 넣음 */
 
-    if (prev_alloc && !next_alloc) {                /* Case 2 */
+    /* Case 2 */   
+    if (prev_alloc && !next_alloc) {                
         removeBlock(NEXT_BLKP(bp));                      // free 상태였던 직후 블록을 free list에서 제거
         size += GET_SIZE(HDRP(NEXT_BLKP(bp)));           /* prev 할당 & next 미할당 */
         PUT(HDRP(bp), PACK(size, 0));                    // 현재 헤더에 새로운 size 넣고
@@ -211,7 +224,8 @@ static void *coalesce(void *bp)
     else if (!prev_alloc && next_alloc) {                /* Case 3*/
         removeBlock(PREV_BLKP(bp));                      // 직전 블록을 free list에서 제거
         size += GET_SIZE(HDRP(PREV_BLKP(bp)));           /* prev 미할당 & next 할당 */
-        bp = PREV_BLKP(bp);                              // bp는 prev에 저장
+        bp = PREV_BLKP(bp);                              // bp는 이전 값에 저장해놓음
+        ptr = HDRP(PREV_BLKP(bp));                       // ptr은 이전 값의 헤더에 저장
         PUT(HDRP(bp), PACK(size, 0));                    // 새로운 사이즈를 prev header에 넣고 저장
         PUT(FTRP(bp), PACK(size, 0));                    // 현재 footer에 새로운 size 넣고
     }
@@ -221,18 +235,16 @@ static void *coalesce(void *bp)
             GET_SIZE(FTRP(NEXT_BLKP(bp)));               /* prev 미할당 & next 미할당 */
         removeBlock(PREV_BLKP(bp));                      // 직전 블록을 free list에서 제거
         removeBlock(NEXT_BLKP(bp));                      // 다음 블록을 free list에서 제거
-        bp = PREV_BLKP(bp);
-        PUT(HDRP(bp), PACK(size, 0));         // 이전 header에 size 넣고
-        PUT(FTRP(bp), PACK(size, 0));         // 이후 footer에 size 넣음
- 
+        bp = PREV_BLKP(bp);                              // ptr은 이전 값의 헤더에 저장
+        ptr = HDRP(PREV_BLKP(bp));      
+        PUT(HDRP(bp), PACK(size, 0));                    // 이전 header에 size 넣고
+        PUT(FTRP(bp), PACK(size, 0));                    // 이후 footer에 size 넣음
     }
-    cur_bp = bp;
 
-    // 연결된 새 가용 블록을 free list에 추가
-    putFreeBlock(bp); // init 시에는 앞 뒤 할당이 되어 있어서 (Prologue, Epilogue) putFreeBlock으로 이동
-                      // 나머지의 경우 앞 뒤 연결 후 해당 값 free_listp에 추가
+    PUT(GET_NEXTP(ptr), NULL);
+    PUT(GET_PREVP(ptr), NULL);
     
-    return bp;
+    return ptr;
 }
 
 /* 
