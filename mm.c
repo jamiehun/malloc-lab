@@ -127,10 +127,11 @@ static void *best_fit(size_t asize);
 static void place(void *bp, size_t asize);
 void removeBlock(void *bp);
 void putFreeBlock(void *bp);
-int get_list_idx(size_t size)
+int get_list_idx(size_t size);
+void** is_head(void* ptr);
 
 
-void *heap_listp;  // Prologue block을 가르키는 정적 전역 변수 설정
+void* heap_listp;  // Prologue block을 가르키는 정적 전역 변수 설정
 void **free_list;  // Array of pointers to the free list
 
 /* 
@@ -147,9 +148,9 @@ int mm_init(void)
         return -1;
     
     PUT(heap_listp, 0);                          // Padding         | 0 
-    PUT(heap_listp + (1*WSIZE), PACK(DSIZE, 1))  // Prologue Header | 8 / 1
-    PUT(heap_listp + (2*WSIZE), PACK(DSIZE, 1))  // Prologue Footer | 8 / 1
-    PUT(heap_listp + (3*WSIZE), PACK(0, 1))      // Epilogue Header | 1 / 0
+    PUT(heap_listp + (1*WSIZE), PACK(DSIZE, 1));  // Prologue Header | 8 / 1
+    PUT(heap_listp + (2*WSIZE), PACK(DSIZE, 1));  // Prologue Footer | 8 / 1
+    PUT(heap_listp + (3*WSIZE), PACK(0, 1));      // Epilogue Header | 1 / 0
 
     // Set Every head to NULL initially
     for (int i = 0; i < FREE_LIST_SIZE; i++){
@@ -161,15 +162,14 @@ int mm_init(void)
       return -1;
 
     // Set up the head_listp to the location of the next block of the initial block
-    head_listp += WSIZE;
+    heap_listp += WSIZE;
 
     return 0;
 }   
 
 /* extend_heap */
 /* 새 가용 블록으로 힙 확장하기 (워드 단위 메모리를 인자로 받아 힙을 늘려줌) */
-static void *extend_heap(size_t words)
-{
+static void *extend_heap(size_t words){
     char *bp;
     size_t size;
 
@@ -181,8 +181,8 @@ static void *extend_heap(size_t words)
 
     /* Initialize free block header/footer and the epilogue header */
     PUT(HDRP(bp), PACK(size, 0));            /* Free block header */
-    PUT(bp, NULL)                            /* NEXT */
-    PUT(bp + WSIZE, NULL)                    /* PREV */
+    PUT(bp, NULL);                           /* NEXT */
+    PUT(bp + WSIZE, NULL);                   /* PREV */
     PUT(FTRP(bp), PACK(size, 0));            /* Free block footer */
     PUT(HDRP(NEXT_BLKP(bp)), PACK(0, 1));    /* New epilogue header */
 
@@ -191,7 +191,7 @@ static void *extend_heap(size_t words)
     /* 매크로의 영향 : #define GET_NEXT(ptr) (*(char **) (ptr + WSIZE)) */
     void *ptr = HDRP(bp);
 
-    ptr = coalesce(bp); // -> coalesce로 이동
+    ptr = coalesce(ptr); // -> coalesce로 이동
     
     // Find place for ptr
     find_place(ptr);
@@ -199,30 +199,72 @@ static void *extend_heap(size_t words)
     return ptr;
 }
 
+/* 
+ * mm_malloc - Allocate a block by incrementing the brk pointer.
+ *     Always allocate a block whose size is a multiple of the alignment.
+ * 블록 할당을 brk 포인터를 증가시킴으로써 실행해줌
+ */
+void *mm_malloc(size_t size){
+    size_t asize;       /* Adjusted block size : 조정된 사이즈 */
+    size_t extendsize;  /* Amount to extend heap if no fit */
+    char *bp;
+    void *location = NULL;
+
+    /* Fake Request 걸러내기 */
+    if (size == 0)
+        return NULL;
+    
+    /* 블록을 최소 16바이트로 늘려줌 (CSAPP 823page) */
+    if (size <= DSIZE)
+        asize = 2*DSIZE; // 최소 16바이트, 8바이트는 header + footer 만의 최소 블록 크기이므로, 그 다음 8의 배수인 16바이트로 설정
+    else                 // 크면
+        asize = DSIZE * ((size + (DSIZE) + (DSIZE - 1)) / DSIZE); // 7을 더함으로써 size = 1일 때 최소 16바이트 나올 수 있음 
+                                                                  // 32비트에서는 8의 배수인 블록을 리턴
+
+    // find the best fit
+    location = find_fit(asize);
+
+    /* asize에 맞는 bp 찾기  */
+    if (location != NULL) {  // 맞는 블록을 찾으면
+        place(location, asize);    // 해당 블록에 할당
+        return bp;
+    }
+
+    /* No fit found Get more memory and place the block (asize 또는 CHUNKSIZE 만큼 가용 리스트 범위 넓혀줌) */
+    // 맞는 크기의 메모리가 없으면 asize 혹은 CHUNKSIZE 보다 크게 heap의 크기를 늘려줌
+    extendsize = MAX(asize, CHUNKSIZE); // asize가 CHUNKSIZE보다 큰 경우는 size가 요구하는 8바이트 기준의 크기가 매우 큼을 의미
+    if ((bp = extend_heap(extendsize / WSIZE)) == NULL) // (extend / 8 word)
+        return NULL;
+    place(location, asize);
+    return bp;
+}
+
+
+
+
 /*
  * find_place : 현재의 ptr이 놓일 적절한 위치를 찾는 함수 (free_list를 위해서)
  */
 
-void find_place(void *ptr)
-{
-  int listIdx = get_list_index(GET_SIZE(ptr));
+void find_place(void *ptr){
+  int listIdx = get_list_idx(GET_SIZE(ptr));
   void *current = free_list[listIdx];
 
-  // Case 1 : Current is NULL
+  // Case 1 : Current is NULL => ptr 값이 free_list의 최초값이 됨
   if(current == NULL){
     free_list[listIdx] = ptr;
 
     return;
   }
 
-  // Case 2 : 바로 뒤에 하나의 값 밖에 없을 때
+  // Case 2 : 바로 뒤에 하나의 값 밖에 없을 때 & 바로 뒤의 값이 ptr보다 클 때
   if(ptr < current)
   {
     PUT(GET_NEXTP(ptr), current);  // ptr의 다음 포인터는 current
-    PUT(GET_NEXT(ptr), *current);  // ptr의 다음 값은 current의 역참조 
+    // PUT(GET_NEXT(ptr), *current);  // ptr의 다음 값은 current의 역참조 
     PUT(GET_PREVP(current), ptr);  // current의 이전 포인터는 ptr
-    PUT(GET_PREV(current), *ptr);  // current의 이전 값은 ptr의 역참조
-    free_list[Idx] = ptr;          
+    // PUT(GET_PREV(current), *ptr);  // current의 이전 값은 ptr의 역참조
+    free_list[listIdx] = ptr;          
 
     return;
   }
@@ -232,17 +274,17 @@ void find_place(void *ptr)
   while ((next = GET_NEXT(current)) != NULL)
   {
     if (ptr < next) {
-      PUT(GET_NEXTP(current) = ptr);
-      PUT(GET_NEXT(current) = *ptr);
+      PUT(GET_NEXTP(current), ptr);
+      // PUT(GET_NEXT(current), *ptr);
 
-      PUT(GET_PREVP(next) = ptr);
-      PUT(GET_PREV(next) = *ptr);
+      PUT(GET_PREVP(next), ptr);
+      // PUT(GET_PREV(next), *ptr);
 
-      PUT(GET_PREVP(ptr) = current);
-      PUT(GET_PREV(ptr) = *current);
+      PUT(GET_PREVP(ptr), current);
+      // PUT(GET_PREV(ptr), *current);
 
-      PUT(GET_NEXTP(ptr) = next);
-      PUT(GET_NEXT(ptr) = *next);
+      PUT(GET_NEXTP(ptr), next);
+      // PUT(GET_NEXT(ptr), *next);
     }
 
     current = GET_NEXTP(current);
@@ -250,18 +292,19 @@ void find_place(void *ptr)
 
   // 가장 마지막에 위치시킴
   PUT(GET_NEXTP(current), ptr);
-  PUT(GET_NEXT(current), *ptr);
+  // PUT(GET_NEXT(current), *ptr);
 
   PUT(GET_PREVP(ptr), current);
-  PUT(GET_PREV(ptr), *current);
+  // PUT(GET_PREV(ptr), *current);
 }
+
+
 
 
 /*
  * coalesce - 연결
  */
-static void *coalesce(void *bp) 
-{
+static void *coalesce(void *bp) {
     size_t prev_alloc = GET_ALLOC(FTRP(PREV_BLKP(bp)));  // prev 블록의 할당여부 확인
     size_t next_alloc = GET_ALLOC(HDRP(NEXT_BLKP(bp)));  // next 블록의 할당여부 확인
     size_t size = GET_SIZE(HDRP(bp));                    // 현재 블록의 사이즈 확인
@@ -306,54 +349,15 @@ static void *coalesce(void *bp)
 }
 
 /* 
- * mm_malloc - Allocate a block by incrementing the brk pointer.
- *     Always allocate a block whose size is a multiple of the alignment.
- * 블록 할당을 brk 포인터를 증가시킴으로써 실행해줌
- */
-void *mm_malloc(size_t size)
-{
-    size_t asize;       /* Adjusted block size : 조정된 사이즈 */
-    size_t extendsize;  /* Amount to extend heap if no fit */
-    char *bp;
-
-    /* Fake Request 걸러내기 */
-    if (size == 0)
-        return NULL;
-    
-    /* 블록을 최소 16바이트로 늘려줌 (CSAPP 823page) */
-    if (size <= DSIZE)
-        asize = 2*DSIZE; // 최소 16바이트, 8바이트는 header + footer 만의 최소 블록 크기이므로, 그 다음 8의 배수인 16바이트로 설정
-    else                 // 크면
-        asize = DSIZE * ((size + (DSIZE) + (DSIZE - 1)) / DSIZE); // 7을 더함으로써 size = 1일 때 최소 16바이트 나올 수 있음 
-                                                                  // 32비트에서는 8의 배수인 블록을 리턴
-
-    /* asize에 맞는 bp 찾기  */
-    if ((bp = find_fit(asize)) != NULL) {  // 맞는 블록을 찾으면
-        place(bp, asize);                // 해당 블록에 할당
-        return bp;
-    }
-
-    /* No fit found Get more memory and place the block (asize 또는 CHUNKSIZE 만큼 가용 리스트 범위 넓혀줌) */
-    // 맞는 크기의 메모리가 없으면 asize 혹은 CHUNKSIZE 보다 크게 heap의 크기를 늘려줌
-    extendsize = MAX(asize, CHUNKSIZE); // asize가 CHUNKSIZE보다 큰 경우는 size가 요구하는 8바이트 기준의 크기가 매우 큼을 의미
-    if ((bp = extend_heap(extendsize / WSIZE)) == NULL) // (extend / 8 word)
-        return NULL;
-    place(bp, asize);
-    return bp;
-
-}
-
-/* 
  * Find_fit
  */
-static void *find_fit(size_t asize)
-{
+static void *find_fit(size_t asize){
     /* First-fit search */
     char *bp;
 
 
     // free list의 맨 마지막은 Prologue Block -> HDR : (16/1)
-    for (bp = free_listp; GET_ALLOC(HDRP(bp)) !=  1; bp = SUCC_FREEP(bp)){ 
+    for (bp = free_list; GET_ALLOC(HDRP(bp)) !=  1; bp = SUCC_FREEP(bp)){ 
         if (asize <= GET_SIZE(HDRP(bp))) { // Implicit와 달리 할당되어있는지 여부는 따로 체크할 필요 없음
             return bp; // 조건에 맞는 블록이 있다면 다음 bp값을 할당해줌
         }
@@ -363,88 +367,100 @@ static void *find_fit(size_t asize)
     return NULL; /* No Fit */
 }
 
-/*
- * Next Fit 함수 
+/* 
+ * removeBlock : 할당되거나 연결되는 가용 블록을 free list에서 없앰
  */
-static void *next_fit(size_t asize){
-    char *bp;
-
-    // cur_bp를 최종값으로 설정해놓고 있으니 cur_bp ~ epilogue 값까지 검색
-    for(bp = cur_bp; GET_SIZE(HDRP(bp)) > 0; bp = NEXT_BLKP(bp)) {
-        if( !GET_ALLOC(HDRP(bp)) && (asize <= GET_SIZE(HDRP(bp))) ) {
-            cur_bp = bp; // cur_bp 최신값으로 설정
-            return bp;
-        }
+void removeBlock(void *ptr){
+    // PREV가 NULL이 아닐 때 이전 포인터의 다음 값은 다음 포인터로 잡음
+    if(GET_PREV(ptr) != NULL){
+      PUT(GET_NEXTP(GET_PREV(ptr)), GET_NEXT(ptr));
     }
 
-    // 위에서 return을 못하면 처음부터 cur_bp까지 search
-    for(bp = free_listp; bp < cur_bp; bp = NEXT_BLKP(bp)){
-        if(!GET_ALLOC(HDRP(bp)) && (asize <= GET_SIZE(HDRP(bp))) ) {
-            cur_bp = bp;
-            return bp;
-        }
+    // PREV가 NULL일 때는 free_list의 첫번째 값을 GET_NEXT로 잡음
+    else{
+      void **h = is_head(ptr);
+      PUT(h, GET_NEXT(ptr));
     }
 
-    // 그래도 없으면 NULL 반환
-    return NULL;
+    // NEXT가 NULL이 아닐 때 NEXT의 PREV는 PREV로 잡음
+    if(GET_NEXT(ptr) != NULL){
+      PUT(GET_PREVP(GET_NEXT(ptr)), GET_PREV(ptr));
+    }
+
+    PUT(GET_NEXTP(ptr), NULL); // 현재 ptr의 다음 포인터 NULL으로 처리
+    PUT(GET_PREVP(ptr), NULL); // 현재 ptr의 이전 포인터 NULL으로 처리
 }
 
 /*
- * Best Fit 함수
+ * is_head(void *ptr) : free_list의 가장 head 값을 보기 위한 함수
  */
-static void *best_fit(size_t asize){
-    char *bp;
-    char *best_bp = NULL;
-    size_t best_size;
-    size_t min = SIZE_MAX;
-
-    for (bp = free_listp; GET_SIZE(HDRP(bp)) > 0; bp = NEXT_BLKP(bp)){ // GET_SIZE(HDRP(bp)) > 0 ; 에필로그 가기 전까지
-        
-
-        if (!GET_ALLOC(HDRP(bp)) && (asize <= GET_SIZE(HDRP(bp)))) {
-            best_size = asize - GET_SIZE(HDRP(bp));
-
-            if (best_size == 0){
-                return bp;
-            }    
-
-            if (best_size < min) {
-                min = best_size;
-                best_bp = bp;
-            } 
-        }
+void** is_head(void* ptr){
+  void* head;
+  int i;
+  for(i = 0; i < FREE_LIST_SIZE; i++){
+    head = free_list[i];
+    if(ptr == head){
+      return &free_list[i];
     }
+  }
 
-    if (best_bp == NULL) {
-        return NULL;
-    }
-    
-    return best_bp;
+  return NULL;
+
 }
+
+/*
+ * get_list_idx :  Free_list의 idx를 찾기 위한 함수
+ */
+int get_list_idx(size_t size){
+  int idx = 0; // idx가 0부터 시작
+
+  // 비트 연산을 활용해서 size를 2의 0승까지 줄임
+  while ((size = size >> 1) > 1)
+  {
+    idx++;
+  }
+
+  return idx;
+}
+
+
+
+/* ========== 검토 완료 ========== */
 
 
 /* 
  * place 함수 : asize를 저장해주는 함수
  */
-static void place(void *bp, size_t asize)      
+static void place(void *ptr, size_t asize)      
 {   
-    size_t csize = GET_SIZE(HDRP(bp));         // fit에서 찾아진 bp의 사이즈를 csize에 할당 (현재 할당되어 있지 않은 상태)
-    removeBlock(bp);                           // 할당되어질 블록이기 때문에 free_list에서 삭제
+    size_t csize = GET_SIZE(ptr);         // fit에서 찾아진 bp의 사이즈를 csize에 할당 (현재 할당되어 있지 않은 상태)
+    removeBlock(ptr);                           // 할당되어질 블록이기 때문에 free_list에서 삭제
 
-    if((csize - asize) >= (2*DSIZE)) {         // (비어있는 블록 - 저장해야하는 사이즈) >= 16 : 필요한 메모리 주소만큼 사용하고 나머지 여분의 주소 사용 가능
-        PUT(HDRP(bp), PACK(asize, 1));         // HDRP(bp)에 asize만큼 저장
-        PUT(FTRP(bp), PACK(asize, 1));         // FTRP(bp)에 asize만큼 저장 (헤더 자리에)
-        bp = NEXT_BLKP(bp);                    // bp는 다음 bp를 뜻함 (다음 bp가 될 자리) : #define 참고
-        PUT(HDRP(bp), PACK(csize-asize, 0));   // 다음 bp는 0을 뜻함
-        PUT(FTRP(bp), PACK(csize-asize, 0));   // 다음 bp의 footer는 0을 뜻함 
+    // 블록을 자를 수 있다면 
+    if((csize - asize) >= (2*DSIZE)) {            // (비어있는 블록 - 저장해야하는 사이즈) >= 16 : 필요한 메모리 주소만큼 사용하고 나머지 여분의 주소 사용 가능
+        PUT(ptr, PACK(asize, 1));                 // HDRP(bp)에 asize만큼 저장
+        PUT(FTRP(ptr + WSIZE), PACK(asize, 1));   // FTRP(bp)에 asize만큼 저장 (헤더 자리에)
+        
+        
+        void *next_bp = NEXT_BLKP(ptr + WSIZE);         // bp는 다음 bp를 뜻함 (다음 bp가 될 자리) : #define 참고
+        
+        // 다음 블록을 설정
+        PUT(HDRP(next_bp), PACK(csize-asize, 0));      // 다음 bp는 0을 뜻함
+        PUT(FTRP(next_bp), PACK(csize-asize, 0));      // 다음 bp의 footer는 0을 뜻함 
 
-        // free list 첫번째에 분할된 블럭에 넣음
-        putFreeBlock(bp);
+        // NEXT와 PREV 값에 NULL을 넣음
+        PUT(next_bp, NULL);
+        PUT(next_bp + WSIZE, NULL);
+
+        void* next_ptr = HDRP(next_bp);
+
+        // next_ptr이 들어갈 수 있는 free_list를 찾음
+        find_place(next_ptr);
     }
 
     else {
-        PUT(HDRP(bp), PACK(csize, 1));
-        PUT(FTRP(bp), PACK(csize, 1)); 
+        PUT(ptr, PACK(csize, 1));
+        PUT(FTRP(ptr + WSIZE), PACK(csize, 1)); 
     }
 }
 
@@ -452,10 +468,10 @@ static void place(void *bp, size_t asize)
  * putFreeBlock(bp) : 새로 반환되거나 생성된 가용 블록을 free list의 첫 부분에 넣음
  */
 void putFreeBlock(void *bp){
-    SUCC_FREEP(bp) = free_listp; // bp는 헤더 다음, SUCC_FREEP의 경우 bp 다음 워드 = 전에 있는 free 값
+    SUCC_FREEP(bp) = free_list; // bp는 헤더 다음, SUCC_FREEP의 경우 bp 다음 워드 = 전에 있는 free 값
     PREC_FREEP(bp) = NULL;       // LIFO이기 때문에 저장되는 값 없음
-    PREC_FREEP(free_listp) = bp; // 이전 값의 이전 주소값은 bp(현재 값)로 설정
-    free_listp = bp;             // free_listp를 현재의 값으로 갱신
+    PREC_FREEP(free_list) = bp; // 이전 값의 이전 주소값은 bp(현재 값)로 설정
+    free_list = bp;             // free_listp를 현재의 값으로 갱신
 
     /* SUCC_FREEP(bp)의 의미 */
     /* bp의 이중포인터의 역참조로 bp를 가르키면 bp는 void pointer임 */
@@ -464,46 +480,48 @@ void putFreeBlock(void *bp){
 }
 
 
-/* 
- * removeBlock : 할당되거나 연결되는 가용 블록을 free list에서 없앰
- */
-void removeBlock(void *bp){
-    // freelist의 첫번째 블록을 없앨 때
-    if (bp == free_listp) {
-        PREC_FREEP(SUCC_FREEP(bp)) = NULL; // 다음 list 해당하는 값의 전의 값은 NULL
-        free_listp = SUCC_FREEP(bp);        // free_listp의 값을 다음 해당하는 값으로 옮김
-    }
-
-    // free list 안에서 없앨 때
-    else{
-        SUCC_FREEP(PREC_FREEP(bp)) = SUCC_FREEP(bp); // 현재 이전의 successor를 현재 이후의 bp로 설정
-        PREC_FREEP(SUCC_FREEP(bp)) = PREC_FREEP(bp); // 현재 이후의 predecessor를 현재 이전의 bp로 설정
-                                                     // 결과적으로 현재값 제외하고 나머지 연결
-    }
-}
-
 /*
  * mm_free - Freeing a block does nothing.
  */
-void mm_free(void *bp)
+void mm_free(void *ptr)
 {
-    size_t size = GET_SIZE(HDRP(bp));   // bp의 size를 얻음
+    size_t size = GET_SIZE(HDRP(ptr));   // bp의 size를 얻음
 
-    PUT(HDRP(bp), PACK(size, 0));       // bp의 헤더에 (size, 0(미할당)) 추가
-    PUT(FTRP(bp), PACK(size, 0));       // bp의 footer에 (size, 0(미할당)) 추가
-    coalesce(bp);                       // 앞, 뒤 블록 중 연결할 곳이 있으면 연결 
+    PUT(ptr, PACK(size, 0));       // bp의 헤더에 (size, 0(미할당)) 추가
+    PUT(ptr, PACK(size, 0));       // bp의 footer에 (size, 0(미할당)) 추가
+    void* newPtr = coalesce(HDRP(ptr));        // 앞, 뒤 블록 중 연결할 곳이 있으면 연결 
+
+    //Place in a free list
+    find_place(newPtr);
 }
 
+
+
+
+
+
+/* ==================== 보류 ==================== */
 /*
+ * 
  * mm_realloc - Changes the size of a previously allocated block
+ * 포인터가 NULL 값일 때   = malloc
+ * 포인터의 사이즈가 0일 때  = free
+ *   
+ * current block이 충분히 크다면 그대로 할당 및 pointer를 return
+ * current block이 충분히 크지 못하다면 다음 블록이 비어있는지 확인 후 연결하여 할당
+ * 
+ * 위의 모든 작업들이 수행 불가능할 시 새로운 메모리를 할당하고 old ptr과 대체 후 새롭게 할당함
+ * 새로운 메모리의 경우 충분한 buffer를 가지고 있음
+ * 
  */
-void *mm_realloc(void *ptr, size_t size)
-{
+void *mm_realloc(void *ptr, size_t size){
+    size_t asize; 
     void *oldptr = ptr;  // 크기를 조절하고 싶은 힙의 시작 포인터
     void *newptr;        // 크기 조절 뒤의 새 힙의 시작 포인터
     size_t copySize;     // 복사할 힙의 크기
     
     newptr = mm_malloc(size); // size에 맞게 mm_malloc 시행
+    
     if (newptr == NULL)
       return NULL;
 
@@ -520,19 +538,4 @@ void *mm_realloc(void *ptr, size_t size)
     memcpy(newptr, oldptr, copySize);  // memcpy(목적지 포인터, 원본포인터, 크기) => 원본 포인터의 내용을 목적지 포인터에 copySize만큼 복사해서 저장
     mm_free(oldptr);                   // oldptr은 free
     return newptr;                     // 새로운 포인터를 리턴
-}
-
-/*
- * get_list_idx :  Free_list의 idx를 찾기 위한 함수
- */
-int get_list_idx(size_t size){
-  int idx = 0; // idx가 0부터 시작
-
-  // 비트 연산을 활용해서 size를 2의 0승까지 줄임
-  while ((size = size >> 1) > 1)
-  {
-    idx++;
-  }
-
-  return idx;
 }
