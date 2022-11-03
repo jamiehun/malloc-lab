@@ -78,6 +78,7 @@ team_t team = {
 #define MINIMUM     16          /* Initial Prologue block size, header, footer, PREC, SUCC */
 #define CHUNKSIZE   (1<<12)     /* Extend heap by this amount (bytes)*/ /* 1 0000 0000 0000(2) => 4096 (bytes) */
 #define FREE_LIST_SIZE 32       /* Free_list_size를 32으로 설정 */
+#define REALLOCATION_SIZE (1<<9)
 
 #define MAX(x, y) ((x) > (y)? (x) : (y)) // 최대값 구하는 함수
 #define MIN(x, y) ((x) < (y)? (x) : (y)) // 최소값 구하는 함수
@@ -134,7 +135,7 @@ void** is_head(void* ptr);
 
 
 void* heap_listp;  // Prologue block을 가르키는 정적 전역 변수 설정
-void **free_list;  // Array of pointers to the free list
+void **free_list;  // free list를 가리키는 포인터 배열 
 
 
 /* 
@@ -179,7 +180,7 @@ int mm_init(void)
 void *mm_malloc(size_t size){
     size_t asize;         /* Adjusted block size : 조정된 사이즈 */
     size_t extendsize;    /* Amount to extend heap if no fit */
-    void *dp = NULL;      
+    void *ptr = NULL;      
 
 
     /* Fake Request 걸러내기 */
@@ -194,20 +195,20 @@ void *mm_malloc(size_t size){
                                                                   // 32비트에서는 8의 배수인 블록을 리턴
 
     // find the best fit
-    dp = find_fit(asize);
+    ptr = find_fit(asize);
 
     /* asize에 맞는 bp 찾기  */
-    if (dp == NULL) {  
+    if (ptr == NULL) {  
 
     /* No fit found Get more memory and place the block (asize 또는 CHUNKSIZE 만큼 가용 리스트 범위 넓혀줌) */
     // 맞는 크기의 메모리가 없으면 asize 혹은 CHUNKSIZE 보다 크게 heap의 크기를 늘려줌
     extendsize = MAX(asize, CHUNKSIZE); // asize가 CHUNKSIZE보다 큰 경우는 size가 요구하는 8바이트 기준의 크기가 매우 큼을 의미
-    if ((dp = extend_heap(extendsize / WSIZE)) == NULL) // (extend / 8 word)
+    if ((ptr = extend_heap(extendsize / WSIZE)) == NULL) // (extend / 8 word)
         return NULL;
     }
 
-    place(dp, asize);
-    return dp + WSIZE;
+    place(ptr, asize);
+    return ptr + WSIZE;
 }
 
 
@@ -219,9 +220,9 @@ void mm_free(void *ptr)
 {
     size_t size = GET_SIZE(HDRP(ptr));         // size를 얻음
 
-    PUT(HDRP(ptr), PACK(size, 0));             // bp의 헤더에 (size, 0(미할당)) 추가
+    PUT(HDRP(ptr), PACK(size, 0));             // bp의 header에 (size, 0(미할당)) 추가
     PUT(HDRP(ptr), PACK(size, 0));             // bp의 footer에 (size, 0(미할당)) 추가
-    void* newPtr = coalesce(HDRP(ptr));  // 앞, 뒤 블록 중 연결할 곳이 있으면 연결 
+    void* newPtr = coalesce(HDRP(ptr));        // 앞, 뒤 블록 중 연결할 곳이 있으면 연결 
 
     //Place in a free list
     find_place(newPtr);
@@ -229,50 +230,91 @@ void mm_free(void *ptr)
 
 /*
  * mm_realloc - Changes the size of a previously allocated block
+ * 1) 포인터가 NULL 값일 때   = malloc
+ * 2) 포인터의 사이즈가 0일 때  = free
+ *   
+ * 3) current block이 충분히 크다면 그대로 할당 및 pointer를 return
+ * 4) current block이 충분히 크지 못하다면 다음 블록이 비어있는지 확인 후 연결하여 할당
+ * 
+ * 위의 모든 작업들이 수행 불가능할 시 새로운 메모리를 할당하고 old ptr과 대체 후 새롭게 할당함
+ * 새로운 메모리의 경우 충분한 buffer를 가지고 있음
  */
 void *mm_realloc(void *ptr, size_t size)
 {
-    void *oldptr = ptr;  // 크기를 조절하고 싶은 힙의 시작 포인터
-    void *newptr;        // 크기 조절 뒤의 새 힙의 시작 포인터
-    size_t copySize;     // 복사할 힙의 크기
+    size_t asize;
+    void *oldptr = ptr;   // 크기를 조절하고 싶은 힙의 시작 포인터
+    void *newptr;         // 크기 조절 뒤의 새 힙의 시작 포인터
+    void *hd = HDRP(ptr); // 헤더에 대한 포인터
+    size_t copySize;      // 복사할 힙의 크기
     
-    newptr = mm_malloc(size); // size에 맞게 mm_malloc 시행
-    if (newptr == NULL)
-      return NULL;
+    // 1) 포인터가 NULL 값일 때
+    if(ptr == NULL) {return mm_malloc(size);}
 
-    // copySize = *(size_t *)((char *)oldptr - SIZE_T_SIZE);
-    /* copySize는 oldptr의 사이즈를 copy (temp와 같은 역할) */
-    /* oldptr에 DSIZE(헤더, 풋터)를 빼줌 => payload */
+    // 2) 포인터의 사이즈가 0일때 => Free
+    if (size == 0)
+    {
+        mm_free(ptr);
+        return ptr;
+    }
 
-    /* 혹은 oldptr의 헤더에 가서 size를 받아줌 */
-    copySize = GET_SIZE(HDRP(oldptr)) - 8; // 8을 빼주는 이유는 헤더와 footer를 제거하기 위함 
+    // 블록의 크기를 최소 16바이트, 8의 배수로 맞춰줌
+    if (size <= DSIZE)
+        asize = 2 * DSIZE;
+    else
+        asize = DSIZE * (size + (DSIZE) + (DSIZE-1) / DSIZE);
 
-    if (size < copySize)    // 만약 copySize(oldptr)이 realloc하려는 (newptr) size보다 크다면
-      copySize = size;      // 크기에 맞는 메모리만 할당되고 나머지는 안됨
+    size_t new_size;
+    size_t old_size = GET_SIZE(hd);
+    void* next = HDRP(NEXT_BLKP(ptr));
 
-    memcpy(newptr, oldptr, copySize);  // memcpy(목적지 포인터, 원본포인터, 크기) => 원본 포인터의 내용을 목적지 포인터에 copySize만큼 복사해서 저장
-    mm_free(oldptr);                   // oldptr은 free
-    return newptr;                     // 새로운 포인터를 리턴
+    // 3) current block이 충분히 크다면
+    if (old_size >= asize){
+        return ptr;
+    }
+
+    // 4) 다음 블록 확인 후 연결하여 해당 값으로 리턴
+    if (!GET_ALLOC(next)){
+        new_size = old_size + GET_SIZE(next);
+        if(new_size >= asize){
+            removeBlock(next);
+            PUT(hd, PACK(new_size, 1));
+            PUT(FTRP(next + WSIZE), PACK(new_size, 1));
+
+            return ptr;
+        }
+    }
+
+    // 혹은 새로운 메모리를 할당 받음
+    new_size = asize + REALLOCATION_SIZE;
+    newptr = mm_malloc(new_size);
+    if(newptr == NULL) { return NULL; }
+
+    //copy the new memory
+    memcpy(newptr, oldptr, MIN(GET_SIZE(HDRP(oldptr)), size));
+
+    // old memory를 free 시킴
+    mm_free(oldptr);
+    return newptr;
 }
 
 
 /* 
- * Find_fit
+ * Find_fit : 알맞는 가용블럭을 찾는 함수, free list에서 가용 리스트를 찾음
  */
 static void *find_fit(size_t asize)
 {
-    //Start at its memory bracket
+    //free list에 접근하기 위해 각 사이즈에 맞는 클래스를 찾음
     int listIndex = get_list_idx(asize);
     void *bp;
 
-    //Search over list to find 
+    //free list로 접근 
     int i;
     for(i = listIndex; i < FREE_LIST_SIZE; i++)
     {
-        //get head of current list
+        // current list의 초기값을 설정
         bp = free_list[i];
 
-        //Go through list until we find a block
+        // 크기에 가장 맞는 free list를 탐색
         while(bp != NULL)
         {
             if(GET_SIZE(bp) >= asize)
@@ -292,20 +334,20 @@ static void *find_fit(size_t asize)
  */
 static void place(void *ptr, size_t asize)      
 {   
-    size_t csize = GET_SIZE(ptr);         // fit에서 찾아진 bp의 사이즈를 csize에 할당 (현재 할당되어 있지 않은 상태)
-    removeBlock(ptr);                           // 할당되어질 블록이기 때문에 free_list에서 삭제
+    size_t csize = GET_SIZE(ptr);                   // fit에서 찾아진 bp의 사이즈를 csize에 할당 (현재 할당되어 있지 않은 상태)
+    removeBlock(ptr);                               // 할당되어질 블록이기 때문에 free_list에서 삭제
 
     // 블록을 자를 수 있다면 
-    if((csize - asize) >= (2*DSIZE)) {            // (비어있는 블록 - 저장해야하는 사이즈) >= 16 : 필요한 메모리 주소만큼 사용하고 나머지 여분의 주소 사용 가능
-        PUT(ptr, PACK(asize, 1));                 // HDRP(bp)에 asize만큼 저장
-        PUT(FTRP(ptr + WSIZE), PACK(asize, 1));   // FTRP(bp)에 asize만큼 저장 (헤더 자리에)
+    if((csize - asize) >= (2*DSIZE)) {               // (비어있는 블록 - 저장해야하는 사이즈) >= 16 : 필요한 메모리 주소만큼 사용하고 나머지 여분의 주소 사용 가능
+        PUT(ptr, PACK(asize, 1));                    // HDRP(bp)에 asize만큼 저장
+        PUT(FTRP(ptr + WSIZE), PACK(asize, 1));      // FTRP(bp)에 asize만큼 저장 (헤더 자리에)
         
         
-        void *next_bp = NEXT_BLKP(ptr + WSIZE);         // bp는 다음 bp를 뜻함 (다음 bp가 될 자리) : #define 참고
+        void *next_bp = NEXT_BLKP(ptr + WSIZE);      // bp는 다음 bp를 뜻함 (다음 bp가 될 자리) : #define 참고
         
         // 다음 블록을 설정
-        PUT(HDRP(next_bp), PACK(csize-asize, 0));      // 다음 bp는 0을 뜻함
-        PUT(FTRP(next_bp), PACK(csize-asize, 0));      // 다음 bp의 footer는 0을 뜻함 
+        PUT(HDRP(next_bp), PACK(csize-asize, 0));    // 다음 bp는 0을 뜻함
+        PUT(FTRP(next_bp), PACK(csize-asize, 0));    // 다음 bp의 footer는 0을 뜻함 
 
         // NEXT와 PREV 값에 NULL을 넣음
         PUT(next_bp, NULL);
@@ -317,6 +359,7 @@ static void place(void *ptr, size_t asize)
         find_place(next_ptr);
     }
 
+    // 블록을 자를 수 없다면
     else {
         PUT(ptr, PACK(csize, 1));
         PUT(FTRP(ptr + WSIZE), PACK(csize, 1)); 
@@ -328,39 +371,39 @@ static void place(void *ptr, size_t asize)
  * coalesce - 연결
  */
 static void *coalesce(void *ptr) {
-    //Get the headers of next and previous
+    
     void* nextH = HDRP(NEXT_BLKP(ptr + WSIZE));
     void* prevH = HDRP(PREV_BLKP(ptr + WSIZE));
 
-    //Get teh sizes of all three
-    size_t prev_alloc = GET_ALLOC(prevH);
-    size_t next_alloc = GET_ALLOC(nextH);
-    size_t size = GET_SIZE(ptr);
+    
+    size_t prev_alloc = GET_ALLOC(prevH);           // prev 블록의 할당여부 확인
+    size_t next_alloc = GET_ALLOC(nextH);           // next 블록의 할당여부 확인
+    size_t size = GET_SIZE(ptr);                    // 현재 블록의 사이즈 확인
 
-    if(prev_alloc && next_alloc) { /*Case 1*/ }
-    else if(prev_alloc && !next_alloc) 
-    { //Case 2
-        removeBlock(nextH);
-
+    if(prev_alloc && next_alloc) {  }               /* Case 1 */ /* prev 할당 & next 할당 */
+    else if(prev_alloc && !next_alloc)              /* Case 2 */
+    {                                               /* prev 할당 & next 미할당 */
+        removeBlock(nextH);                         // free list에서 블록 삭제 후 현재 헤더에 새로운 size 넣고
+                                                    // 새로운 사이즈를 기준으로 새로운 footer에도 정보 저장
         size += GET_SIZE(nextH);
         PUT(ptr, PACK(size, 0));
         PUT(FTRP(ptr + WSIZE), PACK(size, 0));
     } 
-    else if(!prev_alloc && next_alloc) 
-    { //Case 3
-        removeBlock(prevH);
-        
-        size += GET_SIZE(prevH);
+    else if(!prev_alloc && next_alloc)              /* Case 3*/
+    {                                               /* prev 미할당 & next 할당 */  
+        removeBlock(prevH);                         // freelist에서 블록 삭제 후 현재 footer에 새로운 size 넣고
+                                                    // 새로운 사이즈를 prev header에 넣고 저장
+        size += GET_SIZE(prevH);                    // bp는 prev에 저장
 
         PUT(HDRP(PREV_BLKP(ptr + WSIZE)), PACK(size, 0));
         PUT(FTRP(ptr + WSIZE), PACK(size, 0));
 
         ptr = HDRP(PREV_BLKP(ptr + WSIZE));
     }
-    else 
-    { //Case 4
-        removeBlock(prevH);
-        removeBlock(nextH);
+    else                                            /* Case 4 */
+    {                                               /* prev 미할당 & next 미할당 */
+        removeBlock(prevH);                         // freelist에서 이전 블록 삭제 이전 header에 size 넣고
+        removeBlock(nextH);                         // freelist에서 이후 블록 삭제이후 footer에 size 넣음
 
         size += GET_SIZE(prevH) + GET_SIZE(nextH);
 
@@ -412,9 +455,9 @@ void find_place(void *ptr){
   if(ptr < current)
   {
     PUT(GET_NEXTP(ptr), current);  // ptr의 다음 포인터는 current
-    // PUT(GET_NEXT(ptr), *current);  // ptr의 다음 값은 current의 역참조 
+     
     PUT(GET_PREVP(current), ptr);  // current의 이전 포인터는 ptr
-    // PUT(GET_PREV(current), *ptr);  // current의 이전 값은 ptr의 역참조
+    
     free_list[listIdx] = ptr;          
 
     return;
@@ -426,16 +469,16 @@ void find_place(void *ptr){
   {
     if (ptr < next) {
       PUT(GET_NEXTP(current), (uint)ptr);
-      // PUT(GET_NEXT(current), *ptr);
+      
 
       PUT(GET_PREVP(next), (uint)ptr);
-      // PUT(GET_PREV(next), *ptr);
+      
 
       PUT(GET_PREVP(ptr), (uint)current);
-      // PUT(GET_PREV(ptr), *current);
+      
 
       PUT(GET_NEXTP(ptr), (uint)next);
-      // PUT(GET_NEXT(ptr), *next);
+      
 
       return;
     }
@@ -491,8 +534,8 @@ static void *extend_heap(size_t words){
 
     /* Initialize free block header/footer and the epilogue header */
     PUT(HDRP(bp), PACK(size, 0));            /* Free block header */
-    PUT(bp, (uint)NULL);                           /* NEXT */
-    PUT(bp + WSIZE, (uint)NULL);                   /* PREV */
+    PUT(bp, (uint)NULL);                     /* NEXT */
+    PUT(bp + WSIZE, (uint)NULL);             /* PREV */
     PUT(FTRP(bp), PACK(size, 0));            /* Free block footer */
     PUT(HDRP(NEXT_BLKP(bp)), PACK(0, 1));    /* New epilogue header */
 
@@ -522,109 +565,4 @@ int get_list_idx(uint size){
   }
 
   return idx;
-}
-
-
-/* ==================== 보류 ==================== */
-/*
- * 
- * mm_realloc - Changes the size of a previously allocated block
- * 포인터가 NULL 값일 때   = malloc
- * 포인터의 사이즈가 0일 때  = free
- *   
- * current block이 충분히 크다면 그대로 할당 및 pointer를 return
- * current block이 충분히 크지 못하다면 다음 블록이 비어있는지 확인 후 연결하여 할당
- * 
- * 위의 모든 작업들이 수행 불가능할 시 새로운 메모리를 할당하고 old ptr과 대체 후 새롭게 할당함
- * 새로운 메모리의 경우 충분한 buffer를 가지고 있음
- * 
- */
-
-/*
- * mm_check - Function that goes through the entire heap, checks that every block that is free
- *            is in a free list, every block that is allocated is not in a free list, and makes sure
- *            that, if it is free, the next and prev pointers are correct by looking at the values 
- *            of the prev and next and making sure they are pointing to the current ptr.
- *
- *            Note: this is only used for debugging. All occurances in the code that is run
- *            should be commented out.
- */
-int mm_check(void)
-{
-    void* ptr = heap_listp;
-
-    //Go until we reach the epilogue header
-    while(GET_SIZE(ptr) != 0)
-    {
-        //IF the current block is unallocated
-        if(GET_ALLOC(ptr) == 0) 
-        {
-            //Make sure it's in the free list
-            if(!in_free_list(ptr)) 
-            { 
-                printf("%p not in free list but is unallocated\n", ptr);
-                return 1; 
-            }
-
-            //Make sure that its prev is pointing to this ptr
-            if(GET_PREV(ptr) != NULL)
-            {
-                if(GET_NEXT(GET_PREV(ptr)) != ptr)
-                {
-                    printf("The next's previous isn't this\n");
-                    return 1;
-                }
-            }
-
-            //Make sure that its next is pointing to this ptr
-            if(GET_NEXT(ptr) != NULL)
-            {
-                if(GET_PREV(GET_NEXT(ptr)) != ptr)
-                {
-                    printf("The prev's next isn't this\n");
-                    return 1;
-                }
-            }
-        }
-
-        //Otherwise it's allocated
-        else
-        {
-            //Make sure it isn't in a free list
-            if(in_free_list(ptr)) 
-            { 
-                printf("%p in free list but is allocated\n", ptr);
-                return 1; 
-            }
-        }
-
-        //Increment to the next block
-        ptr = HDRP(NEXT_BLKP(ptr + WSIZE));
-    }
-
-    return 0;
-}
-
-/*
- * in_free_list - Checks to ensure that the passed in pointer is contained 
- *                within the free list.
- *
- */
-int in_free_list(void* ptr)
-{
-    void* current;
-
-    int i;
-    for(i = 0; i < FREE_LIST_SIZE; i++)
-    {
-        current = free_list[i];
-
-        while(current != NULL)
-        {
-            if(current == ptr) { return 1; }
-            current = GET_NEXT(current);
-        }
-    }
-
-    return 0;
 }
